@@ -1,0 +1,13 @@
+{
+  "name": "doorbell-watcher",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "UniFi Protect doorbell watcher with CompreFace recognition",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "unifi-protect": "^4.28.0"
+  }
+}

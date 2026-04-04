@@ -1,0 +1,66 @@
+#!/bin/bash
+# Doorbell tools for Ravenclaw agent
+# Usage:
+#   doorbell recognize <image_path>    - Recognize faces in an image
+#   doorbell learn <name> <image_path> - Train a new face
+#   doorbell subjects                  - List known people
+#   doorbell snapshot                  - Take a doorbell snapshot now
+
+COMPREFACE_URL="http://localhost:8000"
+COMPREFACE_KEY="89be3682-3ca3-4a74-88d8-da6e39d46d4d"
+PROTECT_HOST="192.168.178.165"
+PROTECT_USER="ravenclaw"
+PROTECT_PASS="RavenClaw880!"
+DOORBELL_CAM_ID="68627cb8005c2103e40003fe"
+
+case "$1" in
+  recognize)
+    if [ -z "$2" ]; then
+      echo "Usage: doorbell recognize <image_path>"
+      exit 1
+    fi
+    curl -s -X POST "${COMPREFACE_URL}/api/v1/recognition/recognize" \
+      -H "x-api-key: ${COMPREFACE_KEY}" \
+      -F "file=@$2"
+    ;;
+
+  learn)
+    if [ -z "$2" ] || [ -z "$3" ]; then
+      echo "Usage: doorbell learn <name> <image_path>"
+      exit 1
+    fi
+    curl -s -X POST "${COMPREFACE_URL}/api/v1/recognition/faces?subject=$(printf '%s' "$2" | jq -sRr @uri)" \
+      -H "x-api-key: ${COMPREFACE_KEY}" \
+      -F "file=@$3"
+    ;;
+
+  subjects)
+    curl -s "${COMPREFACE_URL}/api/v1/recognition/subjects" \
+      -H "x-api-key: ${COMPREFACE_KEY}"
+    ;;
+
+  snapshot)
+    TOKEN=$(curl -k -s -X POST "https://${PROTECT_HOST}/api/auth/login" \
+      -H "Content-Type: application/json" \
+      -d "{\"username\":\"${PROTECT_USER}\",\"password\":\"${PROTECT_PASS}\"}" \
+      -c - | grep TOKEN | awk '{print $NF}')
+    OUTFILE="/tmp/doorbell_snapshot_$(date +%s).jpg"
+    curl -k -s -b "TOKEN=${TOKEN}" \
+      "https://${PROTECT_HOST}/proxy/protect/api/cameras/${DOORBELL_CAM_ID}/snapshot?w=640&h=480" \
+      -o "${OUTFILE}"
+    echo "{\"file\": \"${OUTFILE}\", \"size\": $(stat -c%s "${OUTFILE}")}"
+    ;;
+
+  *)
+    echo "Doorbell tools for Ravenclaw"
+    echo ""
+    echo "Commands:"
+    echo "  doorbell recognize <image>     - Recognize faces in an image via CompreFace"
+    echo "  doorbell learn <name> <image>  - Train CompreFace to recognize a person"
+    echo "  doorbell subjects              - List all known people"
+    echo "  doorbell snapshot              - Take a live doorbell camera snapshot"
+    echo ""
+    echo "The latest doorbell ring snapshot is always at ~/.openclaw/workspace/doorbell/latest_ring.jpg"
+    echo "Unknown face snapshots are saved at ~/.openclaw/workspace/doorbell/unknown_visitor.jpg"
+    ;;
+esac
