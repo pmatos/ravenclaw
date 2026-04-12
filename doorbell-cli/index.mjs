@@ -6,22 +6,22 @@ import { existsSync, mkdirSync } from "node:fs";
 
 const execFileAsync = promisify(execFile);
 
-// Configuration
+// Configuration — secrets come from environment variables
 const CONFIG = {
   protect: {
-    address: "192.168.178.165",
-    username: "ravenclaw",
-    password: "REDACTED_PROTECT_PASSWORD",
+    address: process.env.PROTECT_ADDRESS || "192.168.178.165",
+    username: process.env.PROTECT_USERNAME || "ravenclaw",
+    password: process.env.PROTECT_PASSWORD,
   },
   compreface: {
-    url: "http://localhost:8000",
-    apiKey: "REDACTED_COMPREFACE_API_KEY",
+    url: process.env.COMPREFACE_URL || "http://localhost:8000",
+    apiKey: process.env.COMPREFACE_API_KEY,
   },
   openclaw: {
     ownerPhone: null,
-    gatewayUrl: "http://127.0.0.1:18789",
-    hookToken: "REDACTED_HOOK_TOKEN",
-    memoryDir: null, // resolved at startup
+    gatewayUrl: process.env.OPENCLAW_GATEWAY_URL || "http://127.0.0.1:18789",
+    hookToken: null,
+    memoryDir: null,
   },
   ringCooldownMs: 30_000,
 };
@@ -172,11 +172,18 @@ async function sendImage(imagePath, caption) {
     "--message", caption,
   ];
 
-  try {
-    const { stdout } = await execFileAsync("openclaw", args, { timeout: 30_000 });
-    if (stdout) log(`Image sent: ${stdout.trim()}`);
-  } catch (err) {
-    log(`Image send error: ${err.message}`);
+  const maxRetries = 3;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const { stdout } = await execFileAsync("openclaw", args, { timeout: 60_000 });
+      if (stdout) log(`Image sent: ${stdout.trim()}`);
+      return;
+    } catch (err) {
+      log(`Image send error (attempt ${attempt}/${maxRetries}): ${err.message}`);
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 5_000));
+      }
+    }
   }
 }
 
@@ -305,8 +312,15 @@ async function handleDoorbellRing(protect, camera) {
 }
 
 async function main() {
+  const required = ["PROTECT_PASSWORD", "COMPREFACE_API_KEY"];
+  const missing = required.filter(k => !process.env[k]);
+  if (missing.length > 0) {
+    log(`FATAL: Missing required env vars: ${missing.join(", ")}`);
+    process.exit(1);
+  }
+
   CONFIG.openclaw.ownerPhone = process.env.OWNER_PHONE || null;
-  CONFIG.openclaw.hookToken = process.env.HOOK_TOKEN || CONFIG.openclaw.hookToken;
+  CONFIG.openclaw.hookToken = process.env.HOOK_TOKEN || "REDACTED_HOOK_TOKEN";
   if (!CONFIG.openclaw.ownerPhone) {
     log("WARNING: OWNER_PHONE not set. Set it to receive WhatsApp notifications.");
   }
