@@ -47,7 +47,7 @@ All secrets are passed via environment variables set in the systemd unit (`~/.co
 
 - `PROTECT_PASSWORD` — UniFi Protect password (**required**)
 - `COMPREFACE_API_KEY` — CompreFace recognition API key (**required**)
-- `OWNER_PHONE` — WhatsApp recipient in E.164 format (e.g., `+49...`)
+- `DOORBELL_TARGET` — WhatsApp recipient: group JID (e.g., `120363...@g.us`) or phone in E.164 format. Falls back to `OWNER_PHONE` if not set.
 - `HOOK_TOKEN` — OpenClaw gateway hook token (**required**)
 - `NODE_TLS_REJECT_UNAUTHORIZED=0` — set by the systemd unit for UniFi self-signed certs
 

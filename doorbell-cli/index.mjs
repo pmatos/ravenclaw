@@ -18,7 +18,7 @@ const CONFIG = {
     apiKey: process.env.COMPREFACE_API_KEY,
   },
   openclaw: {
-    ownerPhone: null,
+    target: null,
     gatewayUrl: process.env.OPENCLAW_GATEWAY_URL || "http://127.0.0.1:18789",
     hookToken: null,
     memoryDir: null,
@@ -161,13 +161,13 @@ async function addFace(name, imageBuffer) {
 }
 
 async function sendImage(imagePath, caption) {
-  const phone = CONFIG.openclaw.ownerPhone;
-  if (!phone) return;
+  const target = CONFIG.openclaw.target;
+  if (!target) return;
 
   const args = [
     "message", "send",
     "--channel", "whatsapp",
-    "--target", phone,
+    "--target", target,
     "--media", imagePath,
     "--message", caption,
   ];
@@ -219,7 +219,7 @@ async function triggerAgentWithDelivery(message) {
         name: "Doorbell",
         deliver: true,
         channel: "whatsapp",
-        to: CONFIG.openclaw.ownerPhone,
+        to: CONFIG.openclaw.target,
       }),
     });
     const data = await resp.json();
@@ -319,10 +319,10 @@ async function main() {
     process.exit(1);
   }
 
-  CONFIG.openclaw.ownerPhone = process.env.OWNER_PHONE || null;
+  CONFIG.openclaw.target = process.env.DOORBELL_TARGET || process.env.OWNER_PHONE || null;
   CONFIG.openclaw.hookToken = process.env.HOOK_TOKEN || "";
-  if (!CONFIG.openclaw.ownerPhone) {
-    log("WARNING: OWNER_PHONE not set. Set it to receive WhatsApp notifications.");
+  if (!CONFIG.openclaw.target) {
+    log("WARNING: DOORBELL_TARGET not set. Set it to a WhatsApp phone or group JID.");
   }
 
   // Set up memory and snapshot directories inside the workspace
