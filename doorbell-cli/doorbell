@@ -6,12 +6,12 @@
 #   doorbell subjects                  - List known people
 #   doorbell snapshot                  - Take a doorbell snapshot now
 
-COMPREFACE_URL="http://localhost:8000"
-COMPREFACE_KEY="REDACTED_COMPREFACE_API_KEY"
-PROTECT_HOST="192.168.178.165"
-PROTECT_USER="ravenclaw"
-PROTECT_PASS="REDACTED_PROTECT_PASSWORD"
-DOORBELL_CAM_ID="68627cb8005c2103e40003fe"
+COMPREFACE_URL="${COMPREFACE_URL:-http://localhost:8000}"
+COMPREFACE_KEY="${COMPREFACE_API_KEY:?COMPREFACE_API_KEY env var is required}"
+PROTECT_HOST="${PROTECT_ADDRESS:-192.168.178.165}"
+PROTECT_USER="${PROTECT_USERNAME:-ravenclaw}"
+PROTECT_PASS="${PROTECT_PASSWORD:?PROTECT_PASSWORD env var is required}"
+DOORBELL_CAM_ID="${DOORBELL_CAM_ID:-68627cb8005c2103e40003fe}"
 
 case "$1" in
   recognize)
