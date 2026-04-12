@@ -34,15 +34,19 @@ node index.mjs                   # run locally (needs OWNER_PHONE env var)
 
 ### Deployment
 
-The service runs on the Hetzner server as a systemd user service (`doorbell-watcher.service`) under the `openclaw` user. Deploy by copying `index.mjs` and `doorbell` to `~/doorbell-watcher/` on the server and restarting:
+The service runs on the Hetzner server as a systemd user service (`doorbell-watcher.service`) under the `openclaw` user. The repo is cloned at `~/ravenclaw` on the server. Deploy by pushing to the remote and pulling on the server:
 
 ```bash
-scp doorbell-cli/index.mjs doorbell-cli/doorbell openclaw@<server>:~/doorbell-watcher/
-ssh openclaw@<server> 'systemctl --user restart doorbell-watcher'
+git push origin main
+ssh openclaw@<server> 'cd ~/ravenclaw && git pull && systemctl --user restart doorbell-watcher'
 ```
 
 ### Environment variables
 
+All secrets are passed via environment variables set in the systemd unit (`~/.config/systemd/user/doorbell-watcher.service`):
+
+- `PROTECT_PASSWORD` — UniFi Protect password (**required**)
+- `COMPREFACE_API_KEY` — CompreFace recognition API key (**required**)
 - `OWNER_PHONE` — WhatsApp recipient in E.164 format (e.g., `+49...`)
-- `HOOK_TOKEN` — OpenClaw gateway hook token (optional, has default in code)
+- `HOOK_TOKEN` — OpenClaw gateway hook token (optional, has default)
 - `NODE_TLS_REJECT_UNAUTHORIZED=0` — set by the systemd unit for UniFi self-signed certs
