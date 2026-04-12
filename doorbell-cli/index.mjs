@@ -320,7 +320,7 @@ async function main() {
   }
 
   CONFIG.openclaw.ownerPhone = process.env.OWNER_PHONE || null;
-  CONFIG.openclaw.hookToken = process.env.HOOK_TOKEN || "REDACTED_HOOK_TOKEN";
+  CONFIG.openclaw.hookToken = process.env.HOOK_TOKEN || "";
   if (!CONFIG.openclaw.ownerPhone) {
     log("WARNING: OWNER_PHONE not set. Set it to receive WhatsApp notifications.");
   }
