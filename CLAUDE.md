@@ -48,5 +48,13 @@ All secrets are passed via environment variables set in the systemd unit (`~/.co
 - `PROTECT_PASSWORD` — UniFi Protect password (**required**)
 - `COMPREFACE_API_KEY` — CompreFace recognition API key (**required**)
 - `OWNER_PHONE` — WhatsApp recipient in E.164 format (e.g., `+49...`)
-- `HOOK_TOKEN` — OpenClaw gateway hook token (optional, has default)
+- `HOOK_TOKEN` — OpenClaw gateway hook token (**required**)
 - `NODE_TLS_REJECT_UNAUTHORIZED=0` — set by the systemd unit for UniFi self-signed certs
+
+### Security
+
+**Never commit secrets to this repo.** All credentials must come from environment variables. The `doorbell` CLI script and `index.mjs` both read secrets from env vars at runtime.
+
+Git history was rewritten on 2026-04-12 to scrub previously committed secrets. Credentials that were exposed should be rotated:
+- UniFi Protect password
+- CompreFace API key
