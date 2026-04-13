@@ -23,7 +23,13 @@ A Node.js (ESM) service that monitors a UniFi Protect doorbell via WebSocket, ca
 
 ### Snapshot strategy
 
-On ring, the service takes multiple snapshot candidates (NVR event thumbnail + two timed live shots), runs all through CompreFace, and picks the one with the highest face detection confidence.
+On ring, a **visit session** starts per camera. Subsequent ring, motion, and smart-detect events extend the session. After 8 seconds of quiet (no new events), the session settles and processing begins with a three-tier strategy:
+
+1. **Video frame extraction** (primary): Fetches an MP4 clip from the NVR covering 10s before the first ring through 5s after the last activity, extracts frames with `ffmpeg` at 2fps, and scores each through CompreFace with early-stop.
+2. **Event thumbnails** (supplement): Fetches NVR thumbnails from all ring/smart-detect events captured during the session.
+3. **Adaptive live snapshots** (fallback): Takes snapshots at increasing delays with early-stop on good face detection score.
+
+The best candidate across all strategies is sent as a single WhatsApp notification per visit. Requires `ffmpeg` on the server.
 
 ### Commands
 

@@ -1,7 +1,7 @@
 import { ProtectApi } from "unifi-protect";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { writeFile, appendFile } from "node:fs/promises";
+import { writeFile, appendFile, readFile, readdir, rm } from "node:fs/promises";
 import { existsSync, mkdirSync } from "node:fs";
 
 const execFileAsync = promisify(execFile);
@@ -23,11 +23,20 @@ const CONFIG = {
     hookToken: null,
     memoryDir: null,
   },
-  ringCooldownMs: 120_000,
+  session: {
+    settleMs: 8_000,
+    preRingWindowMs: 10_000,
+    postActivityMs: 5_000,
+    maxSessionMs: 120_000,
+    frameSampleIntervalMs: 500,
+    earlyStopScore: 0.97,
+    maxFrames: 40,
+  },
 };
 
-// State
-let lastRingTime = 0;
+// State — per-camera visit sessions instead of a global cooldown
+/** @type {Map<string, object>} */
+const activeSessions = new Map();
 
 function log(msg) {
   const ts = new Date().toISOString();
@@ -70,62 +79,239 @@ async function findRingEvent(protect, cameraId, ringTimestamp) {
   }
 }
 
-async function getBestSnapshot(protect, camera, ringTimestamp) {
-  // Strategy: take multiple shots and pick the best face
-  const candidates = [];
+// --- Visit session lifecycle ---
 
-  // 1. Try event thumbnail (captured by NVR at ring time)
-  const ringEvent = await findRingEvent(protect, camera.id, ringTimestamp);
-  if (ringEvent) {
-    const thumb = await fetchEventThumbnail(protect, ringEvent.id);
-    if (thumb && thumb.length > 1000) {
-      candidates.push({ source: "event-thumbnail", data: thumb });
-    }
+function createSession(cameraId, ringTs) {
+  return {
+    cameraId,
+    firstRingTs: ringTs,
+    lastActivityTs: ringTs,
+    events: [{ type: "ring", ts: ringTs }],
+    settleTimer: null,
+    settled: false,
+    processing: false,
+  };
+}
+
+function onRing(protect, camera, ringTs) {
+  const existing = activeSessions.get(camera.id);
+  if (existing && !existing.settled) {
+    extendSession(camera.id, "ring", ringTs);
+    return;
   }
+  const session = createSession(camera.id, ringTs);
+  activeSessions.set(camera.id, session);
+  log(`Visit session started on ${camera.name}`);
+  resetSettleTimer(protect, camera, session);
+}
 
-  // 2. Take live snapshots: dense around ring time (face toward camera),
-  //    then sparser later in case the person approaches slowly
-  for (const delay of [500, 1200, 2000, 3000, 4500, 6000, 8000, 10000, 12000]) {
-    const elapsed = Date.now() - ringTimestamp;
-    const wait = delay - elapsed;
-    if (wait > 0) await new Promise(r => setTimeout(r, wait));
-
-    try {
-      const snap = await fetchSnapshot(protect, camera);
-      candidates.push({ source: `snapshot-${delay}ms`, data: snap });
-    } catch (err) {
-      log(`Snapshot at ${delay}ms failed: ${err.message}`);
-    }
+function extendSession(cameraId, eventType, ts, eventId) {
+  const session = activeSessions.get(cameraId);
+  if (!session || session.settled) return;
+  session.events.push({ type: eventType, ts, eventId });
+  session.lastActivityTs = Math.max(session.lastActivityTs, ts);
+  log(`Session extended: ${eventType}${eventId ? ` (event ${eventId})` : ""}`);
+  if (Date.now() - session.firstRingTs > CONFIG.session.maxSessionMs) {
+    log("Session hit max duration, force-settling");
+    clearTimeout(session.settleTimer);
+    settleSession(session._protect, session._camera, session);
+    return;
   }
+  resetSettleTimer(session._protect, session._camera, session);
+}
 
-  if (candidates.length === 0) throw new Error("No snapshots captured");
+function resetSettleTimer(protect, camera, session) {
+  // Stash protect/camera refs for extendSession to use
+  session._protect = protect;
+  session._camera = camera;
+  if (session.settleTimer) clearTimeout(session.settleTimer);
+  session.settleTimer = setTimeout(() => {
+    settleSession(protect, camera, session);
+  }, CONFIG.session.settleMs);
+}
 
-  // Run all through CompreFace, pick the one with best face probability
+function settleSession(protect, camera, session) {
+  if (session.settled) return;
+  session.settled = true;
+  session.processing = true;
+  activeSessions.delete(camera.id);
+  const duration = ((session.lastActivityTs - session.firstRingTs) / 1000).toFixed(1);
+  log(`Session settled on ${camera.name}: ${session.events.length} events over ${duration}s`);
+  processSession(protect, camera, session);
+}
+
+// --- Snapshot strategies ---
+
+async function getBestFrameFromVideo(protect, camera, startTs, endTs) {
+  const url = `https://${CONFIG.protect.address}/proxy/protect/api/video/export?` +
+    `camera=${camera.id}&start=${startTs}&end=${endTs}`;
+  const resp = await fetch(url, { headers: protect.headers });
+  if (!resp.ok) throw new Error(`Video export HTTP ${resp.status}`);
+
+  const videoPath = `${CONFIG.openclaw.snapDir}/visit_clip.mp4`;
+  const videoBuffer = Buffer.from(await resp.arrayBuffer());
+  await writeFile(videoPath, videoBuffer);
+  const clipDuration = ((endTs - startTs) / 1000).toFixed(1);
+  log(`Video clip: ${videoBuffer.length} bytes, ${clipDuration}s`);
+
+  const frameDir = `${CONFIG.openclaw.snapDir}/frames`;
+  if (!existsSync(frameDir)) mkdirSync(frameDir, { recursive: true });
+
+  const fps = 1000 / CONFIG.session.frameSampleIntervalMs;
+  await execFileAsync("ffmpeg", [
+    "-y", "-i", videoPath,
+    "-vf", `fps=${fps}`,
+    "-frames:v", String(CONFIG.session.maxFrames),
+    "-q:v", "2",
+    `${frameDir}/frame_%04d.jpg`
+  ], { timeout: 30_000 });
+
+  const frameFiles = (await readdir(frameDir)).filter(f => f.endsWith(".jpg")).sort();
+  if (frameFiles.length === 0) throw new Error("No frames extracted");
+  log(`Extracted ${frameFiles.length} frames from video`);
+
   let best = null;
   let bestScore = -1;
 
-  for (const c of candidates) {
-    const result = await recognizeFace(c.data);
+  for (const file of frameFiles) {
+    const frameData = await readFile(`${frameDir}/${file}`);
+    const result = await recognizeFace(frameData);
     const faces = result.result || [];
     const topScore = faces.length > 0
       ? Math.max(...faces.map(f => f.box?.probability || 0))
       : 0;
-    log(`${c.source}: ${c.data.length} bytes, ${faces.length} face(s), best score ${topScore.toFixed(3)}`);
+    log(`${file}: ${faces.length} face(s), score ${topScore.toFixed(3)}`);
 
     if (topScore > bestScore) {
       bestScore = topScore;
-      best = { ...c, recognitionResult: result };
+      best = { source: `video-frame-${file}`, data: frameData, score: topScore, recognitionResult: result };
+    }
+    if (topScore >= CONFIG.session.earlyStopScore) {
+      log(`Early stop on ${file}`);
+      break;
     }
   }
 
-  // If no faces found in any, just use the largest image
-  if (bestScore <= 0) {
-    best = candidates.reduce((a, b) => a.data.length > b.data.length ? a : b);
-    best.recognitionResult = await recognizeFace(best.data);
+  await rm(frameDir, { recursive: true, force: true });
+  await rm(videoPath, { force: true });
+
+  return best;
+}
+
+async function getBestFromEventThumbnails(protect, session) {
+  const eventsWithIds = session.events.filter(e => e.eventId);
+  if (eventsWithIds.length === 0) return null;
+
+  let best = null;
+  let bestScore = -1;
+
+  for (const ev of eventsWithIds) {
+    const thumb = await fetchEventThumbnail(protect, ev.eventId);
+    if (!thumb || thumb.length < 1000) continue;
+
+    const result = await recognizeFace(thumb);
+    const faces = result.result || [];
+    const topScore = faces.length > 0
+      ? Math.max(...faces.map(f => f.box?.probability || 0))
+      : 0;
+    log(`Event thumbnail ${ev.eventId}: ${faces.length} face(s), score ${topScore.toFixed(3)}`);
+
+    if (topScore > bestScore) {
+      bestScore = topScore;
+      best = { source: `event-thumb-${ev.eventId}`, data: thumb, score: topScore, recognitionResult: result };
+    }
   }
 
-  log(`Best snapshot: ${best.source} (score ${bestScore.toFixed(3)})`);
   return best;
+}
+
+async function getAdaptiveSnapshot(protect, camera) {
+  const delays = [0, 1000, 2500, 5000];
+  let best = null;
+  let bestScore = -1;
+
+  for (const delay of delays) {
+    if (delay > 0) await new Promise(r => setTimeout(r, delay));
+
+    try {
+      const snap = await fetchSnapshot(protect, camera);
+      const result = await recognizeFace(snap);
+      const faces = result.result || [];
+      const topScore = faces.length > 0
+        ? Math.max(...faces.map(f => f.box?.probability || 0))
+        : 0;
+      log(`Adaptive snap ${delay}ms: ${faces.length} face(s), score ${topScore.toFixed(3)}`);
+
+      if (topScore > bestScore) {
+        bestScore = topScore;
+        best = { source: `adaptive-snap-${delay}ms`, data: snap, score: topScore, recognitionResult: result };
+      }
+      if (topScore >= CONFIG.session.earlyStopScore) break;
+    } catch (err) {
+      log(`Adaptive snapshot at ${delay}ms failed: ${err.message}`);
+    }
+  }
+
+  return best;
+}
+
+// --- Session processing ---
+
+async function processSession(protect, camera, session) {
+  const startTs = session.firstRingTs - CONFIG.session.preRingWindowMs;
+  const endTs = session.lastActivityTs + CONFIG.session.postActivityMs;
+  log(`Processing session on ${camera.name}: window ${new Date(startTs).toISOString()} to ${new Date(endTs).toISOString()}`);
+
+  let best = null;
+
+  // Strategy 1: Video export + frame extraction (includes pre-ring frames)
+  try {
+    best = await getBestFrameFromVideo(protect, camera, startTs, endTs);
+    if (best) log(`Video strategy: best score ${best.score.toFixed(3)}`);
+  } catch (err) {
+    log(`Video extraction failed: ${err.message}`);
+  }
+
+  // Strategy 2: Event thumbnails from all session events
+  if (!best || best.score < CONFIG.session.earlyStopScore) {
+    try {
+      const thumbBest = await getBestFromEventThumbnails(protect, session);
+      if (thumbBest && (!best || thumbBest.score > best.score)) {
+        best = thumbBest;
+        log(`Event thumbnail strategy: best score ${best.score.toFixed(3)}`);
+      }
+    } catch (err) {
+      log(`Event thumbnail strategy failed: ${err.message}`);
+    }
+  }
+
+  // Strategy 3: Adaptive live snapshots (fallback)
+  if (!best || best.score < 0.5) {
+    try {
+      const snapBest = await getAdaptiveSnapshot(protect, camera);
+      if (snapBest && (!best || snapBest.score > best.score)) {
+        best = snapBest;
+        log(`Adaptive snapshot strategy: best score ${best.score.toFixed(3)}`);
+      }
+    } catch (err) {
+      log(`Adaptive snapshot failed: ${err.message}`);
+    }
+  }
+
+  // Last resort: single snapshot
+  if (!best) {
+    log("No candidates from any strategy, taking last-resort snapshot");
+    try {
+      const snap = await fetchSnapshot(protect, camera);
+      best = { source: "last-resort", data: snap, score: 0, recognitionResult: await recognizeFace(snap) };
+    } catch (err) {
+      log(`Last-resort snapshot failed: ${err.message}`);
+      return;
+    }
+  }
+
+  log(`Best result: ${best.source} (score ${best.score.toFixed(3)})`);
+  await notifyVisit(camera, session, best);
 }
 
 async function recognizeFace(imageBuffer) {
@@ -243,29 +429,14 @@ async function logToMemory(entry) {
   }
 }
 
-async function handleDoorbellRing(protect, camera) {
-  const now = Date.now();
-
-  // Cooldown to avoid duplicate notifications
-  if (now - lastRingTime < CONFIG.ringCooldownMs) {
-    log("Ring ignored (cooldown)");
-    return;
-  }
-  lastRingTime = now;
-
-  log(`Doorbell ring detected on ${camera.name}!`);
-
+async function notifyVisit(camera, session, best) {
   try {
-    // Get best snapshot from multiple candidates
-    const ringTimestamp = Date.now();
-    const best = await getBestSnapshot(protect, camera, ringTimestamp);
     const snapshot = best.data;
     const result = best.recognitionResult;
     const snapPath = `${CONFIG.openclaw.snapDir}/latest_ring.jpg`;
     await writeFile(snapPath, snapshot);
     log(`Snapshot saved (${snapshot.length} bytes, source: ${best.source})`);
 
-    // Determine who it is and notify
     let caption;
     let agentFollowUp;
 
@@ -290,24 +461,22 @@ async function handleDoorbellRing(protect, camera) {
       }
     }
 
-    // 1. Send the snapshot image directly via WhatsApp (reliable)
     log(`Sending image: ${caption}`);
     await sendImage(snapPath, caption);
 
-    // 2. Log to memory for durable history
-    await logToMemory(`Doorbell rang. ${caption}`);
+    const ringCount = session.events.filter(e => e.type === "ring").length;
+    const duration = ((session.lastActivityTs - session.firstRingTs) / 1000).toFixed(0);
+    await logToMemory(`Doorbell visit (${ringCount} ring(s), ${duration}s, best: ${best.source}). ${caption}`);
 
-    // 3. Inject context into agent session so Ravenclaw remembers
     const timestamp = new Date().toLocaleTimeString("en-GB", { timeZone: "Europe/Berlin" });
     await injectContext(`DOORBELL EVENT at ${timestamp}: ${caption} A snapshot was sent to Paulo via WhatsApp.`);
 
-    // 4. For unknown faces, trigger agent to ask who it is
     if (agentFollowUp) {
       log("Triggering agent for face learning...");
       await triggerAgentWithDelivery(agentFollowUp);
     }
   } catch (err) {
-    log(`Error handling ring: ${err.message}`);
+    log(`Error in notifyVisit: ${err.message}`);
     console.error(err);
   }
 }
@@ -377,21 +546,38 @@ async function main() {
     log(`${cam.name}: initial lastRing = ${cam.lastRing}`);
   }
 
-  // Listen for real-time events
+  // Listen for real-time events — rings start sessions, motion/smart-detect extend them
   protect.on("message", (packet) => {
-    if (packet.header?.action !== "update" || packet.header?.modelKey !== "camera") return;
-
+    const { action, modelKey, id: deviceId } = packet.header ?? {};
     const payload = packet.payload;
-    if (!payload || typeof payload !== "object" || !("lastRing" in payload)) return;
+    if (!payload || typeof payload !== "object") return;
 
-    const camId = packet.header.id;
-    const newRing = payload.lastRing;
+    // Camera property updates (lastRing, lastMotion, isSmartDetected)
+    if (action === "update" && modelKey === "camera") {
+      const cam = doorbells.find(d => d.id === deviceId);
+      if (!cam) return;
 
-    if (doorbells.some(d => d.id === camId) && newRing > (ringTimestamps[camId] || 0)) {
-      ringTimestamps[camId] = newRing;
-      const camera = doorbells.find(d => d.id === camId);
-      log(`Ring event: ${camera.name} at ${new Date(newRing).toISOString()}`);
-      handleDoorbellRing(protect, camera);
+      if ("lastRing" in payload && payload.lastRing > (ringTimestamps[cam.id] || 0)) {
+        ringTimestamps[cam.id] = payload.lastRing;
+        log(`Ring event: ${cam.name} at ${new Date(payload.lastRing).toISOString()}`);
+        onRing(protect, cam, payload.lastRing);
+      }
+      if ("lastMotion" in payload && activeSessions.has(cam.id)) {
+        extendSession(cam.id, "motion", payload.lastMotion);
+      }
+      if (payload.isSmartDetected && activeSessions.has(cam.id)) {
+        extendSession(cam.id, "smartDetect", Date.now());
+      }
+    }
+
+    // Event objects carry eventIds useful for fetching thumbnails
+    if (action === "add" && modelKey === "event") {
+      const camId = payload.camera;
+      if (!camId || !activeSessions.has(camId)) return;
+      const evType = payload.type;
+      if (evType === "smartDetectZone" || evType === "ring") {
+        extendSession(camId, evType, payload.start || Date.now(), payload.id);
+      }
     }
   });
 
