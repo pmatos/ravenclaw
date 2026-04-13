@@ -23,7 +23,7 @@ const CONFIG = {
     hookToken: null,
     memoryDir: null,
   },
-  ringCooldownMs: 30_000,
+  ringCooldownMs: 120_000,
 };
 
 // State
@@ -83,8 +83,9 @@ async function getBestSnapshot(protect, camera, ringTimestamp) {
     }
   }
 
-  // 2. Take live snapshots spread over ~12s to catch the person approaching
-  for (const delay of [1000, 2500, 4000, 5500, 7000, 8500, 10000, 11500]) {
+  // 2. Take live snapshots: dense around ring time (face toward camera),
+  //    then sparser later in case the person approaches slowly
+  for (const delay of [500, 1200, 2000, 3000, 4500, 6000, 8000, 10000, 12000]) {
     const elapsed = Date.now() - ringTimestamp;
     const wait = delay - elapsed;
     if (wait > 0) await new Promise(r => setTimeout(r, wait));
