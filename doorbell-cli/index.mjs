@@ -469,11 +469,14 @@ async function notifyVisit(camera, session, best) {
     await logToMemory(`Doorbell visit (${ringCount} ring(s), ${duration}s, best: ${best.source}). ${caption}`);
 
     const timestamp = new Date().toLocaleTimeString("en-GB", { timeZone: "Europe/Berlin" });
-    await injectContext(`DOORBELL EVENT at ${timestamp}: ${caption} A snapshot was sent to Paulo via WhatsApp.`);
 
     if (agentFollowUp) {
+      // Unknown visitor: trigger agent directly — skip injectContext to avoid
+      // the agent seeing the event in its session and sending a duplicate message later.
       log("Triggering agent for face learning...");
       await triggerAgentWithDelivery(agentFollowUp);
+    } else {
+      await injectContext(`DOORBELL EVENT at ${timestamp}: ${caption} A snapshot was sent to Paulo via WhatsApp.`);
     }
   } catch (err) {
     log(`Error in notifyVisit: ${err.message}`);
