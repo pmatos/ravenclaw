@@ -457,7 +457,7 @@ async function notifyVisit(camera, session, best) {
         const unknownPath = `${CONFIG.openclaw.snapDir}/unknown_visitor.jpg`;
         await writeFile(unknownPath, snapshot);
         caption = "Someone I don't recognize is at the door.";
-        agentFollowUp = `I just sent Paulo a doorbell photo of someone I don't recognize. The photo is at ${unknownPath}. Ask Paulo who it is. When he replies with a name, run: doorbell learn "<name>" ${unknownPath}`;
+        agentFollowUp = `An unknown person just rang the doorbell. A photo was already sent to WhatsApp with the caption "${caption}". Your reply will be delivered directly as a WhatsApp message — do NOT describe what you plan to send, just write the message itself. Ask Paulo if he knows who this person is. If Paulo later replies with a name, run: doorbell learn "<name>" ${unknownPath}`;
       }
     }
 
