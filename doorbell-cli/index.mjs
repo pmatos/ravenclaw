@@ -367,6 +367,10 @@ async function sendImage(imagePath, caption) {
       return;
     } catch (err) {
       log(`Image send error (attempt ${attempt}/${maxRetries}): ${err.message}`);
+      if (/gateway timeout/i.test(err.message)) {
+        log("Treating gateway timeout as likely-success — not retrying to avoid duplicate.");
+        return;
+      }
       if (attempt < maxRetries) {
         await new Promise(r => setTimeout(r, 5_000));
       }
