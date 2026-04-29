@@ -392,30 +392,6 @@ async function injectContext(text) {
   }
 }
 
-async function triggerAgentWithDelivery(message) {
-  // POST /hooks/agent runs a full agent turn and delivers to WhatsApp
-  try {
-    const resp = await fetch(`${CONFIG.openclaw.gatewayUrl}/hooks/agent`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${CONFIG.openclaw.hookToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        message,
-        name: "Doorbell",
-        deliver: true,
-        channel: "whatsapp",
-        to: CONFIG.openclaw.target,
-      }),
-    });
-    const data = await resp.json();
-    log(`Agent triggered via /hooks/agent: ${JSON.stringify(data)}`);
-  } catch (err) {
-    log(`Agent trigger error: ${err.message}`);
-  }
-}
-
 async function logToMemory(entry) {
   if (!CONFIG.openclaw.memoryDir) return;
   const today = new Date().toISOString().split("T")[0];
@@ -438,11 +414,10 @@ async function notifyVisit(camera, session, best) {
     log(`Snapshot saved (${snapshot.length} bytes, source: ${best.source})`);
 
     let caption;
-    let agentFollowUp;
+    let unknownPath = null;
 
     if (result.code === 28 || !result.result || result.result.length === 0) {
       caption = "Someone rang the doorbell but I couldn't see their face.";
-      agentFollowUp = null;
     } else {
       const faces = result.result;
       const recognized = faces
@@ -452,12 +427,10 @@ async function notifyVisit(camera, session, best) {
       if (recognized.length > 0) {
         const names = recognized.join(" and ");
         caption = `${names} is at the door.`;
-        agentFollowUp = null;
       } else {
-        const unknownPath = `${CONFIG.openclaw.snapDir}/unknown_visitor.jpg`;
+        unknownPath = `${CONFIG.openclaw.snapDir}/unknown_visitor.jpg`;
         await writeFile(unknownPath, snapshot);
-        caption = "Someone I don't recognize is at the door.";
-        agentFollowUp = `An unknown person just rang the doorbell. A photo was already sent to WhatsApp with the caption "${caption}". Your reply will be delivered directly as a WhatsApp message — do NOT describe what you plan to send, just write the message itself. Ask Paulo if he knows who this person is. If Paulo later replies with a name, run: doorbell learn "<name>" ${unknownPath}`;
+        caption = "Someone is at the door — do you know who this is?";
       }
     }
 
@@ -469,15 +442,11 @@ async function notifyVisit(camera, session, best) {
     await logToMemory(`Doorbell visit (${ringCount} ring(s), ${duration}s, best: ${best.source}). ${caption}`);
 
     const timestamp = new Date().toLocaleTimeString("en-GB", { timeZone: "Europe/Berlin" });
-
-    if (agentFollowUp) {
-      // Unknown visitor: trigger agent directly — skip injectContext to avoid
-      // the agent seeing the event in its session and sending a duplicate message later.
-      log("Triggering agent for face learning...");
-      await triggerAgentWithDelivery(agentFollowUp);
-    } else {
-      await injectContext(`DOORBELL EVENT at ${timestamp}: ${caption} A snapshot was sent to Paulo via WhatsApp.`);
-    }
+    const baseContext = `DOORBELL EVENT at ${timestamp}: ${caption} The photo was already sent to Paulo via WhatsApp.`;
+    const context = unknownPath
+      ? `${baseContext} The unknown visitor's snapshot is at ${unknownPath}. Do NOT send any new WhatsApp message about this on this turn. On Paulo's next reply, follow the Doorbell workflow in TOOLS.md to learn the face.`
+      : `${baseContext} No action needed.`;
+    await injectContext(context);
   } catch (err) {
     log(`Error in notifyVisit: ${err.message}`);
     console.error(err);
