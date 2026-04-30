@@ -29,8 +29,12 @@ const CONFIG = {
     postActivityMs: 5_000,
     maxSessionMs: 120_000,
     frameSampleIntervalMs: 500,
-    earlyStopScore: 0.97,
     maxFrames: 40,
+    // Quality = face_probability * sqrt(face_pixel_area). Skip thumbnail
+    // strategy if video already produced a frame above this; fall through to
+    // live snapshots only if no strategy produced a face above the floor.
+    skipThumbsQuality: 200,
+    fallbackFloorQuality: 30,
   },
 };
 
@@ -41,6 +45,26 @@ const activeSessions = new Map();
 function log(msg) {
   const ts = new Date().toISOString();
   console.log(`[${ts}] ${msg}`);
+}
+
+// Score a recognition result by combining detection probability with face
+// pixel area. A small but very confidently-detected face still loses to a
+// closer face with slightly lower probability — which is what we want for
+// "the visitor at the door" rather than "the most face-like patch in the
+// frame". Returns the best face's quality and its components.
+function frameQuality(faces) {
+  let best = { quality: 0, prob: 0, area: 0 };
+  if (!faces) return best;
+  for (const f of faces) {
+    const box = f.box || {};
+    const w = Math.max(0, (box.x_max ?? 0) - (box.x_min ?? 0));
+    const h = Math.max(0, (box.y_max ?? 0) - (box.y_min ?? 0));
+    const area = w * h;
+    const prob = box.probability ?? 0;
+    const quality = prob * Math.sqrt(area);
+    if (quality > best.quality) best = { quality, prob, area };
+  }
+  return best;
 }
 
 async function fetchSnapshot(protect, camera) {
@@ -171,24 +195,18 @@ async function getBestFrameFromVideo(protect, camera, startTs, endTs) {
   log(`Extracted ${frameFiles.length} frames from video`);
 
   let best = null;
-  let bestScore = -1;
+  let bestQuality = -1;
 
   for (const file of frameFiles) {
     const frameData = await readFile(`${frameDir}/${file}`);
     const result = await recognizeFace(frameData);
     const faces = result.result || [];
-    const topScore = faces.length > 0
-      ? Math.max(...faces.map(f => f.box?.probability || 0))
-      : 0;
-    log(`${file}: ${faces.length} face(s), score ${topScore.toFixed(3)}`);
+    const { quality, prob, area } = frameQuality(faces);
+    log(`${file}: ${faces.length} face(s), prob ${prob.toFixed(3)}, area ${area.toFixed(0)}px², q ${quality.toFixed(1)}`);
 
-    if (topScore > bestScore) {
-      bestScore = topScore;
-      best = { source: `video-frame-${file}`, data: frameData, score: topScore, recognitionResult: result };
-    }
-    if (topScore >= CONFIG.session.earlyStopScore) {
-      log(`Early stop on ${file}`);
-      break;
+    if (quality > bestQuality) {
+      bestQuality = quality;
+      best = { source: `video-frame-${file}`, data: frameData, score: quality, recognitionResult: result };
     }
   }
 
@@ -203,7 +221,7 @@ async function getBestFromEventThumbnails(protect, session) {
   if (eventsWithIds.length === 0) return null;
 
   let best = null;
-  let bestScore = -1;
+  let bestQuality = -1;
 
   for (const ev of eventsWithIds) {
     const thumb = await fetchEventThumbnail(protect, ev.eventId);
@@ -211,14 +229,12 @@ async function getBestFromEventThumbnails(protect, session) {
 
     const result = await recognizeFace(thumb);
     const faces = result.result || [];
-    const topScore = faces.length > 0
-      ? Math.max(...faces.map(f => f.box?.probability || 0))
-      : 0;
-    log(`Event thumbnail ${ev.eventId}: ${faces.length} face(s), score ${topScore.toFixed(3)}`);
+    const { quality, prob, area } = frameQuality(faces);
+    log(`Event thumbnail ${ev.eventId}: ${faces.length} face(s), prob ${prob.toFixed(3)}, area ${area.toFixed(0)}px², q ${quality.toFixed(1)}`);
 
-    if (topScore > bestScore) {
-      bestScore = topScore;
-      best = { source: `event-thumb-${ev.eventId}`, data: thumb, score: topScore, recognitionResult: result };
+    if (quality > bestQuality) {
+      bestQuality = quality;
+      best = { source: `event-thumb-${ev.eventId}`, data: thumb, score: quality, recognitionResult: result };
     }
   }
 
@@ -228,7 +244,7 @@ async function getBestFromEventThumbnails(protect, session) {
 async function getAdaptiveSnapshot(protect, camera) {
   const delays = [0, 1000, 2500, 5000];
   let best = null;
-  let bestScore = -1;
+  let bestQuality = -1;
 
   for (const delay of delays) {
     if (delay > 0) await new Promise(r => setTimeout(r, delay));
@@ -237,16 +253,13 @@ async function getAdaptiveSnapshot(protect, camera) {
       const snap = await fetchSnapshot(protect, camera);
       const result = await recognizeFace(snap);
       const faces = result.result || [];
-      const topScore = faces.length > 0
-        ? Math.max(...faces.map(f => f.box?.probability || 0))
-        : 0;
-      log(`Adaptive snap ${delay}ms: ${faces.length} face(s), score ${topScore.toFixed(3)}`);
+      const { quality, prob, area } = frameQuality(faces);
+      log(`Adaptive snap ${delay}ms: ${faces.length} face(s), prob ${prob.toFixed(3)}, area ${area.toFixed(0)}px², q ${quality.toFixed(1)}`);
 
-      if (topScore > bestScore) {
-        bestScore = topScore;
-        best = { source: `adaptive-snap-${delay}ms`, data: snap, score: topScore, recognitionResult: result };
+      if (quality > bestQuality) {
+        bestQuality = quality;
+        best = { source: `adaptive-snap-${delay}ms`, data: snap, score: quality, recognitionResult: result };
       }
-      if (topScore >= CONFIG.session.earlyStopScore) break;
     } catch (err) {
       log(`Adaptive snapshot at ${delay}ms failed: ${err.message}`);
     }
@@ -267,18 +280,18 @@ async function processSession(protect, camera, session) {
   // Strategy 1: Video export + frame extraction (includes pre-ring frames)
   try {
     best = await getBestFrameFromVideo(protect, camera, startTs, endTs);
-    if (best) log(`Video strategy: best score ${best.score.toFixed(3)}`);
+    if (best) log(`Video strategy: best quality ${best.score.toFixed(1)}`);
   } catch (err) {
     log(`Video extraction failed: ${err.message}`);
   }
 
   // Strategy 2: Event thumbnails from all session events
-  if (!best || best.score < CONFIG.session.earlyStopScore) {
+  if (!best || best.score < CONFIG.session.skipThumbsQuality) {
     try {
       const thumbBest = await getBestFromEventThumbnails(protect, session);
       if (thumbBest && (!best || thumbBest.score > best.score)) {
         best = thumbBest;
-        log(`Event thumbnail strategy: best score ${best.score.toFixed(3)}`);
+        log(`Event thumbnail strategy: best quality ${best.score.toFixed(1)}`);
       }
     } catch (err) {
       log(`Event thumbnail strategy failed: ${err.message}`);
@@ -286,12 +299,12 @@ async function processSession(protect, camera, session) {
   }
 
   // Strategy 3: Adaptive live snapshots (fallback)
-  if (!best || best.score < 0.5) {
+  if (!best || best.score < CONFIG.session.fallbackFloorQuality) {
     try {
       const snapBest = await getAdaptiveSnapshot(protect, camera);
       if (snapBest && (!best || snapBest.score > best.score)) {
         best = snapBest;
-        log(`Adaptive snapshot strategy: best score ${best.score.toFixed(3)}`);
+        log(`Adaptive snapshot strategy: best quality ${best.score.toFixed(1)}`);
       }
     } catch (err) {
       log(`Adaptive snapshot failed: ${err.message}`);
@@ -310,7 +323,7 @@ async function processSession(protect, camera, session) {
     }
   }
 
-  log(`Best result: ${best.source} (score ${best.score.toFixed(3)})`);
+  log(`Best result: ${best.source} (quality ${best.score.toFixed(1)})`);
   await notifyVisit(camera, session, best);
 }
 
