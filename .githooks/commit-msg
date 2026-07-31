@@ -1,0 +1,22 @@
+#!/usr/bin/env sh
+# Validates the commit message subject against Conventional Commits
+# (https://www.conventionalcommits.org/). Enabled via:
+#   git config core.hooksPath .githooks
+set -eu
+
+msg_file="$1"
+first_line=$(head -n1 "$msg_file")
+
+case "$first_line" in
+  "Merge "*|"Revert "*|"fixup! "*|"squash! "*) exit 0 ;;
+esac
+
+pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-zA-Z0-9_./-]+\))?!?: .+'
+
+if ! printf '%s\n' "$first_line" | grep -Eq "$pattern"; then
+  echo "commit-msg: subject does not follow Conventional Commits:" >&2
+  echo "  $first_line" >&2
+  echo "  expected: type(scope)?: description" >&2
+  echo "  types: build chore ci docs feat fix perf refactor revert style test" >&2
+  exit 1
+fi
