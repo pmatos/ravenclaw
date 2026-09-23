@@ -47,6 +47,8 @@ git push origin main
 ssh openclaw@<server> 'cd ~/ravenclaw && git pull && systemctl --user restart doorbell-watcher'
 ```
 
+**Stop and confirm before running this sequence.** It acts directly on the live production Hetzner server and restarts `doorbell-watcher`, a service other notifications depend on. Do not run it unattended — pause and get explicit confirmation first.
+
 ### Environment variables
 
 All secrets are passed via environment variables set in the systemd unit (`~/.config/systemd/user/doorbell-watcher.service`):
